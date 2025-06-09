@@ -6,7 +6,7 @@ import time
 app = FastAPI()
 
 SERVICE_1_URL = "https://prod-tools.kodif.io/tools/internal/execute"
-SERVICE_2_URL = "https://tools.kodif.io/tools/internal/execute"
+SERVICE_2_URL = "http://tools.kodif.io/tools/internal/execute"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -29,14 +29,14 @@ async def aggregate():
     durations_1 = []
     durations_2 = []
 
-    for i in range(10):
+    for i in range(100):
         start = time.perf_counter()
         res = await client.post(SERVICE_1_URL, json=payload)
         duration = time.perf_counter() - start
         durations_1.append(duration)
         logging.info(f"[Service 1 - #{i+1}] Status: {res.status_code}, Time: {duration:.3f}s")
 
-    for i in range(10):
+    for i in range(1):
         start = time.perf_counter()
         res = await client.post(SERVICE_2_URL, json=payload)
         duration = time.perf_counter() - start
