@@ -8,8 +8,8 @@ jobs:
   Apply_K8S_Secrets:
     runs-on: ubuntu-latest
     env:
-      SECRET_NAME: checker-secrets
-      SECRET_NAMESPACE: checker
+      SECRET_NAME: tools-secrets
+      SECRET_NAMESPACE: kodif-prod
       AWS_REGION: us-west-1
       EKS_CLUSTER_NAME: kodif-prod
     steps:
