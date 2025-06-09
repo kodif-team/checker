@@ -1,0 +1,145 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - prod-k8s
+
+jobs:
+  Apply_K8S_Secrets:
+    runs-on: ubuntu-latest
+    env:
+      SECRET_NAME: checker-secrets
+      SECRET_NAMESPACE: checker
+      AWS_REGION: us-west-1
+      EKS_CLUSTER_NAME: kodif-prod
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          sudo wget https://github.com/mikefarah/yq/releases/download/v4.43.1/yq_linux_amd64 -O /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig from EKS
+        run: |
+          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+
+      - name: Dump all GitHub secrets into JSON
+        id: dump_secrets
+        run: |
+          echo '${{ toJson(secrets) }}' > secrets.json
+          jq 'keys' secrets.json
+
+      - name: Create Kubernetes Secret manifest directly
+        run: |
+          echo "Creating k8s-secret.yaml directly from GitHub Secrets"
+          echo "apiVersion: v1" > k8s-secret.yaml
+          echo "kind: Secret" >> k8s-secret.yaml
+          echo "metadata:" >> k8s-secret.yaml
+          echo "  name: $SECRET_NAME" >> k8s-secret.yaml
+          echo "  namespace: $SECRET_NAMESPACE" >> k8s-secret.yaml
+          echo "type: Opaque" >> k8s-secret.yaml
+          echo "data:" >> k8s-secret.yaml
+          jq -r '
+            to_entries[] 
+            | select(.key | startswith("K8S_")) 
+            | .key |= sub("^K8S_";"") 
+            | "  \(.key): \(.value | @base64)"
+          ' secrets.json >> k8s-secret.yaml
+
+      - name: Get existing Kubernetes Secret if exists
+        run: |
+          set +e
+          kubectl get secret $SECRET_NAME --namespace=$SECRET_NAMESPACE -o json | jq -S '.data' > existing-data.json
+          if [ $? -ne 0 ]; then
+            echo "{}" > existing-data.json
+          fi
+          set -e
+
+      - name: Extract data from new k8s-secret.yaml
+        run: |
+          yq -o=json e '.data' k8s-secret.yaml | jq -S . > new-data.json
+
+      - name: Compare secrets and decide to apply
+        id: compare_secrets
+        run: |
+          echo "Comparing generated secret with existing one..."
+          diff_output=$(diff -u existing-data.json new-data.json || true)
+          if [ -z "$diff_output" ]; then
+            echo "Secrets are identical. Skipping apply."
+            echo "apply_required=false" >> $GITHUB_ENV
+          else
+            echo "Secrets differ. Will apply."
+            echo "apply_required=true" >> $GITHUB_ENV
+          fi
+
+      - name: Conditionally apply Kubernetes Secret
+        if: env.apply_required == 'true'
+        run: |
+          echo "Applying updated Kubernetes Secret."
+          kubectl apply -f k8s-secret.yaml --namespace=$SECRET_NAMESPACE
+
+      - name: Cleanup temporary files
+        if: always()
+        run: |
+          echo "Cleaning up temporary files..."
+          rm -f secrets.json existing-data.json new-data.json k8s-secret.yaml
+
+
+  build-and-push:
+    needs: Apply_K8S_Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set short git commit SHA
+        id: vars
+        run: |
+          calculatedSha=$(git rev-parse --short ${{ github.sha }})
+          echo "COMMIT_SHORT_SHA=$calculatedSha" >> $GITHUB_ENV
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-1
+
+      - name: Build and Push Docker Image
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          IMAGE_URI: 564621394902.dkr.ecr.us-west-1.amazonaws.com/checker
+        run: |
+           aws ecr get-login-password --region us-west-1 | docker login --username AWS --password-stdin 564621394902.dkr.ecr.us-west-1.amazonaws.com
+           docker build --no-cache -t ${{ env.IMAGE_URI }}:${{ env.COMMIT_SHORT_SHA }} .
+           docker push ${{ env.IMAGE_URI }}:${{ env.COMMIT_SHORT_SHA }}
+           docker rmi  ${{ env.IMAGE_URI }}:${{ env.COMMIT_SHORT_SHA }}
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_CICD }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      # Step 8: Clone ai-infrastructure separately
+      - name: Clone ai-infrastructure
+        run: |
+          git clone git@github.com:kodif-team/k8s-infrastructure.git -b prod
+          cd k8s-infrastructure
+          sed -i "s/^  tag:.*/  tag: \"${{ env.COMMIT_SHORT_SHA }}\"/" helm/checker/prod-values.yaml
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git add helm/checker/prod-values.yaml
+          git commit -m "Update image tag to commit ${{ env.COMMIT_SHORT_SHA }}"
+          git push

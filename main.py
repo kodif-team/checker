@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 import httpx
 import logging
 import time
@@ -11,7 +11,8 @@ SERVICE_2_URL = "http://tools.kodif.io/tools/internal/execute"
 logging.basicConfig(level=logging.INFO)
 
 @app.get("/")
-async def aggregate():
+async def aggregate(request: Request):
+    logging.info(f"URL received by FastAPI: {request.url}")
     payload = {
     "name": "zendesk_list_all_articles",
     "company_id": "2438",
@@ -24,7 +25,7 @@ async def aggregate():
         "Connection": "close"  
     }
 
-    client = httpx.AsyncClient(http2=False, headers=headers)
+    client = httpx.AsyncClient(http2=False, headers=headers, follow_redirects=True)
 
     durations_1 = []
     durations_2 = []
